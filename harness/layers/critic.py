@@ -79,16 +79,58 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        if not isinstance(report, dict):
+            return report
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            return report
+
+        observed_text = ctx.observed_text
+        new_claims = []
+        split_happened = False
+
+        for claim in claims:
+            if not isinstance(claim, dict) or "text" not in claim:
+                continue
+            text = claim.get("text")
+            if not isinstance(text, str):
+                continue
+
+            if text in observed_text:
+                new_claims.append(claim)
+            else:
+                if " và " in text:
+                    parts = text.split(" và ", 1)
+                    part1, part2 = parts[0].strip(), parts[1].strip()
+                    if part1 in observed_text and part2 in observed_text:
+                        doc1, doc2 = None, None
+                        if ctx.corpus and hasattr(ctx.corpus, "docs"):
+                            for doc in ctx.corpus.docs:
+                                if doc.body and doc.body in observed_text:
+                                    if doc1 is None and part1 in doc.body:
+                                        doc1 = doc.doc_id
+                                    if doc2 is None and part2 in doc.body:
+                                        doc2 = doc.doc_id
+                        if doc1 is None:
+                            doc1 = claim.get("doc_id")
+                        if doc2 is None:
+                            doc2 = claim.get("doc_id")
+                        if doc1 and doc2 and doc1 != doc2:
+                            new_claims.append({"text": part1, "doc_id": doc1})
+                            new_claims.append({"text": part2, "doc_id": doc2})
+                            split_happened = True
+                            continue
+
+        if not new_claims:
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = "Không đủ căn cứ để trả lời dựa trên tài liệu đã có."
+        else:
+            report["claims"] = new_claims
+            citations = sorted(list(set(c["doc_id"] for c in new_claims if isinstance(c, dict) and "doc_id" in c)))
+            report["citations"] = citations
+            if split_happened:
+                report["abstain"] = True
+
+        return report
